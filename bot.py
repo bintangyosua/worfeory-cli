@@ -46,6 +46,9 @@ STATE_SCOREBOARD = "SCOREBOARD"
 STATE_BETWEEN_GAMES = "BETWEEN_GAMES"
 STATE_UNKNOWN = "UNKNOWN"
 
+# States the bot can act on (not just idle-poll)
+ACTIONABLE_STATES = {STATE_LOBBY, STATE_IN_GAME, STATE_SCOREBOARD}
+
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -195,7 +198,11 @@ def click_play_game(driver):
 
 
 def type_word(driver, word):
-    """Type a word using the on-screen keyboard buttons."""
+    """Type a word using the on-screen keyboard buttons.
+
+    Uses JavaScript clicks to avoid ElementClickInterceptedException
+    when overlays are partially covering the keyboard.
+    """
     keyboard = driver.find_element(By.CSS_SELECTOR, "div.Game-keyboard")
     buttons = keyboard.find_elements(By.CSS_SELECTOR, "div.Game-keyboard-button")
 
@@ -210,14 +217,14 @@ def type_word(driver, word):
 
     for ch in word.lower():
         if ch in button_map:
-            button_map[ch].click()
+            driver.execute_script("arguments[0].click();", button_map[ch])
             time.sleep(0.05)
         else:
             print(f"  [WARN] Key '{ch}' not found on keyboard")
 
     time.sleep(0.1)
     if enter_btn:
-        enter_btn.click()
+        driver.execute_script("arguments[0].click();", enter_btn)
     else:
         print("  [ERROR] Enter button not found!")
 
@@ -318,6 +325,12 @@ def play_round(driver):
         return False
 
     for attempt in range(start_row, MAX_ATTEMPTS):
+        # Re-check state before each guess to avoid typing into an overlay
+        current_state = detect_state(driver)
+        if current_state not in (STATE_IN_GAME,):
+            print(f"  [INFO] State changed to {current_state}, aborting round")
+            return False
+
         print(f"  [{attempt + 1}/{MAX_ATTEMPTS}] guess={guess.upper()}")
 
         type_word(driver, guess)
@@ -369,6 +382,7 @@ def main():
     current_game_round = None
     round_played_this_cycle = False
     last_state = None
+    stuck_since = None  # timestamp when we entered an idle state
 
     try:
         print(f"[INIT] {WORDLE_URL}")
@@ -387,9 +401,12 @@ def main():
             if state != last_state:
                 print(f"\n[STATE] {state}")
                 last_state = state
+                # Reset stuck timer on any state change
+                stuck_since = None
 
             # ── LOBBY: click "Play Game" to join ──────────────────────────
             if state == STATE_LOBBY:
+                stuck_since = None
                 print("  Joining game...")
                 if click_play_game(driver):
                     print("  Joined.")
@@ -407,6 +424,7 @@ def main():
 
             # ── IN_GAME: play the round ───────────────────────────────────
             elif state == STATE_IN_GAME:
+                stuck_since = None
                 rnd, total = get_round_info(driver)
                 rnd_str = f"Round {rnd}/{total}" if rnd else "Round ?/?"
                 print(f"  {rnd_str}")
@@ -430,26 +448,56 @@ def main():
 
             # ── WAITING: solved/failed early, waiting for timer ───────────
             elif state == STATE_WAITING:
-                # Just poll until state changes to SCOREBOARD or IN_GAME
+                if stuck_since is None:
+                    stuck_since = time.time()
                 time.sleep(POLL_INTERVAL)
 
             # ── SCOREBOARD: popup between rounds ─────────────────────────
             elif state == STATE_SCOREBOARD:
-                print("  Scoreboard visible, waiting...")
+                stuck_since = None
+                print("  Scoreboard visible, waiting for it to close...")
                 # Wait for scoreboard to auto-dismiss
                 while detect_state(driver) == STATE_SCOREBOARD:
                     time.sleep(0.5)
                 print("  Scoreboard closed.")
-                time.sleep(0.5)
+
+                # Give the page time to transition (board reset / lobby)
+                time.sleep(1.5)
+
+                # Actively wait for a clear next state before resuming
+                print("  Waiting for next round/game...")
+                transition_start = time.time()
+                while time.time() - transition_start < 30:
+                    next_state = detect_state(driver)
+                    if next_state in ACTIONABLE_STATES:
+                        print(f"  Transitioned to {next_state}")
+                        break
+                    time.sleep(0.5)
+                else:
+                    # 30s passed without an actionable state — force refresh
+                    print("  [WARN] Stuck after scoreboard, refreshing page...")
+                    driver.get(WORDLE_URL)
+                    time.sleep(3)
 
             # ── BETWEEN_GAMES: all rounds done, waiting for next game ────
             elif state == STATE_BETWEEN_GAMES:
-                # Just poll until a new game starts (board becomes active)
+                if stuck_since is None:
+                    stuck_since = time.time()
                 time.sleep(POLL_INTERVAL)
 
             # ── UNKNOWN: can't determine state ───────────────────────────
             elif state == STATE_UNKNOWN:
+                if stuck_since is None:
+                    stuck_since = time.time()
                 time.sleep(POLL_INTERVAL)
+
+            # ── Stuck too long in an idle state? Refresh. ─────────────────
+            if stuck_since and (time.time() - stuck_since > 90):
+                print("  [WARN] Stuck for 90s, refreshing page...")
+                driver.get(WORDLE_URL)
+                time.sleep(3)
+                stuck_since = None
+                last_state = None
 
     except KeyboardInterrupt:
         print("\n\n" + "=" * 55)
