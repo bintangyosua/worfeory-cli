@@ -34,11 +34,7 @@ MAX_ATTEMPTS = 6
 POLL_INTERVAL = 0.3     # seconds between state/DOM checks
 USERNAME = ""           # leave empty to keep whatever is in the input
 
-# Chrome profile — set these to reuse an existing Chrome profile.
-# Find your path at chrome://version → "Profile Path".
-# Example: C:\Users\itzbi\AppData\Local\Google\Chrome\User Data
-CHROME_USER_DATA_DIR = r"C:\Users\itzbi\AppData\Local\Google\Chrome\User Data"
-CHROME_PROFILE = "Profile 2"  # or "Profile 1", "Profile 2", etc.
+
 
 
 # ─── State Constants ──────────────────────────────────────────────────────────
@@ -51,65 +47,15 @@ STATE_BETWEEN_GAMES = "BETWEEN_GAMES"
 STATE_UNKNOWN = "UNKNOWN"
 
 
-import shutil
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-# Separate working directory so chromedriver doesn't conflict with Chrome's default
-CHROME_WORK_DIR = os.path.join(os.path.dirname(__file__), ".chrome_session")
-
-
-def ensure_chrome_closed():
-    """Kill existing Chrome processes to free the profile lock."""
-    try:
-        result = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq chrome.exe"],
-            capture_output=True, text=True
-        )
-        if "chrome.exe" in result.stdout:
-            print("[INIT] Closing Chrome to free profile lock...")
-            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
-            time.sleep(1)
-    except Exception:
-        pass
-
-
-def copy_profile():
-    """Copy the Chrome profile to a working directory.
-
-    ChromeDriver needs a non-default user-data-dir for remote debugging.
-    We copy the profile so the original Chrome installation stays untouched.
-    """
-    src = os.path.join(CHROME_USER_DATA_DIR, CHROME_PROFILE)
-    dst = os.path.join(CHROME_WORK_DIR, CHROME_PROFILE)
-
-    if not os.path.isdir(src):
-        print(f"[ERROR] Profile not found: {src}")
-        sys.exit(1)
-
-    print(f"[INIT] Syncing profile from {CHROME_PROFILE}...")
-    os.makedirs(dst, exist_ok=True)
-    shutil.copytree(src, dst, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns(
-                        "Cache", "Code Cache", "GPUCache",
-                        "Service Worker", "GCM Store",
-                        "*.ldb", "*.log", "LOCK", "LOG*"
-                    ))
-    print("[INIT] Profile ready.")
-
-
 def create_driver():
-    """Create a Chrome WebDriver using a copied profile."""
-    if CHROME_USER_DATA_DIR:
-        ensure_chrome_closed()
-        copy_profile()
+    """Create a Chrome WebDriver with a clean session."""
     options = Options()
     options.add_argument("--start-maximized")
     options.add_argument("--disable-notifications")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    if CHROME_USER_DATA_DIR:
-        options.add_argument(f"--user-data-dir={CHROME_WORK_DIR}")
-        options.add_argument(f"--profile-directory={CHROME_PROFILE}")
     driver = webdriver.Chrome(options=options)
     return driver
 
